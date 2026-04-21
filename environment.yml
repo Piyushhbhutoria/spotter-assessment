@@ -1,0 +1,13 @@
+name: spotter-assessment
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - django==6.0.4
+      - djangorestframework==3.17.1
+      - requests==2.33.1
+      - geopy==2.4.1
+      - numpy==2.4.4
+      - python-dotenv==1.2.2
