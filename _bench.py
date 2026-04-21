@@ -10,6 +10,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 
 import requests as _req
+from django.conf import settings
 from routing.services import ors_client, fuel_data, optimizer
 
 
@@ -59,7 +60,10 @@ def profile_inproc() -> None:
         )
         route = ors_client.get_route(s_lat, s_lon, f_lat, f_lon)
         optimizer.select_fuel_stops(
-            route["geometry"], route["distance_meters"], stops, geohash_index=index
+            route["geometry"],
+            route["distance_meters"],
+            index,
+            settings.ROUTE_CORRIDOR_MILES,
         )
 
     print("\n=== cProfile (in-process, warm) ===")

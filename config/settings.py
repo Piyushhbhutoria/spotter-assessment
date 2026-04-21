@@ -28,7 +28,6 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'rest_framework',
     'routing',
 ]
 
@@ -115,8 +114,3 @@ FUEL_CSV_PATH = BASE_DIR / 'Fuel Prices Assessment.csv'
 FUEL_GEOCODE_CACHE_PATH = BASE_DIR / 'fuel_geocode_cache.json'
 
 ROUTE_CORRIDOR_MILES = 5
-
-REST_FRAMEWORK = {
-    'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
-    'DEFAULT_PARSER_CLASSES': ['rest_framework.parsers.JSONParser'],
-}

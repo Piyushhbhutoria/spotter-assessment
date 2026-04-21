@@ -7,13 +7,12 @@ from typing import TypedDict
 
 import numpy as np
 import pygeohash as pgh
-from django.conf import settings
 
+from .constants import EARTH_RADIUS_MILES, GEOHASH_PRECISION, METERS_PER_MILE
 from .fuel_data import FuelStop
 
 MAX_RANGE_MILES = 500.0
 MPG = 10.0
-METERS_PER_MILE = 1609.344
 
 
 class StopResult(TypedDict):
@@ -29,16 +28,6 @@ class StopResult(TypedDict):
     position_miles: float
 
 
-def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two points in miles."""
-    R = 3958.8  # Earth radius in miles
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(a))
-
-
 def _cumulative_distances_miles(coords: list[list[float]]) -> np.ndarray:
     """
     Given a list of [lon, lat] polyline coordinates, return a 1-D array of
@@ -47,7 +36,6 @@ def _cumulative_distances_miles(coords: list[list[float]]) -> np.ndarray:
     lons = np.array([c[0] for c in coords])
     lats = np.array([c[1] for c in coords])
 
-    R = 3958.8
     lat_r = np.radians(lats)
     lon_r = np.radians(lons)
 
@@ -57,7 +45,7 @@ def _cumulative_distances_miles(coords: list[list[float]]) -> np.ndarray:
     lat2 = lat_r[1:]
 
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    seg_dist = 2 * R * np.arcsin(np.sqrt(a))
+    seg_dist = 2 * EARTH_RADIUS_MILES * np.arcsin(np.sqrt(a))
 
     cum = np.zeros(len(coords))
     cum[1:] = np.cumsum(seg_dist)
@@ -70,7 +58,7 @@ def _project_all_stops(
     poly_lats: np.ndarray,
     poly_lons: np.ndarray,
     cum_dist: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Project every stop onto the route and return positions and distances."""
     lat_scale = 69.0
     mean_lat = float(poly_lats.mean())
@@ -117,7 +105,6 @@ def _project_all_stops(
 
 
 _SAMPLE_EVERY_MILES = 10.0
-_GEOHASH_PRECISION = 4
 
 
 def _nine_cells(cell: str) -> list[str]:
@@ -153,7 +140,7 @@ def _candidate_stops(
         if pos - prev_pos < _SAMPLE_EVERY_MILES and i != len(route_coords) - 1:
             continue
         prev_pos = pos
-        cell = pgh.encode(coord[1], coord[0], precision=_GEOHASH_PRECISION)
+        cell = pgh.encode(coord[1], coord[0], precision=GEOHASH_PRECISION)
         if cell in seen_cells:
             continue
         seen_cells.add(cell)
@@ -169,21 +156,23 @@ def _candidate_stops(
 def select_fuel_stops(
     route_coords: list[list[float]],
     total_distance_meters: float,
-    fuel_stops: list[FuelStop],
-    geohash_index: dict[str, list[FuelStop]] | None = None,
+    geohash_index: dict[str, list[FuelStop]],
+    corridor_miles: float,
 ) -> tuple[list[StopResult], float]:
     """Return the minimum-cost fuel-stop sequence and total cost."""
-    corridor_miles: float = getattr(settings, "ROUTE_CORRIDOR_MILES", 5)
     total_miles = total_distance_meters / METERS_PER_MILE
 
     poly_lats = np.array([c[1] for c in route_coords])
     poly_lons = np.array([c[0] for c in route_coords])
     cum_dist = _cumulative_distances_miles(route_coords)
 
-    if geohash_index:
-        candidates = _candidate_stops(route_coords, cum_dist, geohash_index)
-    else:
-        candidates = fuel_stops
+    candidates = _candidate_stops(route_coords, cum_dist, geohash_index)
+    if not candidates:
+        if total_miles <= MAX_RANGE_MILES:
+            return [], 0.0
+        raise ValueError(
+            "No feasible route found: not enough fuel stops within 500-mile windows."
+        )
 
     all_lats = np.array([s["lat"] for s in candidates])
     all_lons = np.array([s["lon"] for s in candidates])

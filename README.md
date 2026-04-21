@@ -2,7 +2,7 @@
 
 Django 6 app with a single JSON API: given US start and finish addresses, it returns an OpenRouteService route geometry, suggested fuel stops (500 mi range, 10 MPG, prices from the bundled CSV), and total fuel cost. Fuel-stop coordinates are served from a local geocode cache built from the CSV.
 
-**Stack:** Django, Django REST Framework (views are plain `JsonResponse`), OpenRouteService (geocoding + driving directions), NumPy/geohash for corridor search, ArcGIS (via geopy) only when building the fuel cache.
+**Stack:** Django, OpenRouteService (geocoding + driving directions), NumPy/geohash for corridor search, ArcGIS (via geopy) only when building the fuel cache.
 
 ---
 

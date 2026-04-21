@@ -3,17 +3,17 @@
 import json
 import logging
 
+from django.conf import settings
 from django.http import JsonResponse
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from .services import ors_client, fuel_data, optimizer
+from .services.constants import METERS_PER_MILE
 from .services.fuel_data import FuelStop
 
 logger = logging.getLogger(__name__)
-
-_METERS_PER_MILE = 1609.344
 
 _fuel_stops: list[FuelStop] | None = None
 _geohash_index: dict | None = None
@@ -79,8 +79,8 @@ class RouteView(View):
             chosen_stops, total_cost = optimizer.select_fuel_stops(
                 route["geometry"],
                 route["distance_meters"],
-                stops,
-                geohash_index=geo_index,
+                geo_index,
+                settings.ROUTE_CORRIDOR_MILES,
             )
         except ValueError as exc:
             return JsonResponse({"error": str(exc)}, status=422)
@@ -93,7 +93,7 @@ class RouteView(View):
                 "start": start,
                 "finish": finish,
                 "total_distance_miles": round(
-                    route["distance_meters"] / _METERS_PER_MILE, 2
+                    route["distance_meters"] / METERS_PER_MILE, 2
                 ),
                 "total_fuel_cost": total_cost,
                 "route_geometry": {

@@ -10,6 +10,8 @@ import pygeohash as pgh
 from geopy.geocoders import ArcGIS
 from django.conf import settings
 
+from .constants import GEOHASH_PRECISION
+
 logger = logging.getLogger(__name__)
 
 _US_STATE_CODES = {
@@ -110,12 +112,9 @@ def geocode_missing(
     return newly_done, len(city_state_pairs) - len(missing)
 
 
-_GEOHASH_PRECISION = 4  # cells ≈ 40 × 20 km; sufficient for 5-mile corridor lookup
-
-
 def build_geohash_index(
     stops: list[FuelStop],
-    precision: int = _GEOHASH_PRECISION,
+    precision: int = GEOHASH_PRECISION,
 ) -> dict[str, list[FuelStop]]:
     """Build `geohash -> stops` index for nearby stop lookup."""
     index: dict[str, list[FuelStop]] = {}
