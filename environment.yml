@@ -11,3 +11,4 @@ dependencies:
       - geopy==2.4.1
       - numpy==2.4.4
       - python-dotenv==1.2.2
+      - pygeohash==3.2.2

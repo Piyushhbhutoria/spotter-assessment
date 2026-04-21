@@ -1,22 +1,4 @@
-"""
-Fuel stop selection optimizer.
-
-Algorithm overview:
-  1. Project each fuel stop onto the route polyline: find the closest polyline
-     point and record cumulative route distance at that point.
-  2. Filter stops beyond ROUTE_CORRIDOR_MILES from the polyline.
-  3. Run dynamic programming over the sorted stop positions to find the
-     minimum-cost sequence of fuel stops that keeps the vehicle within
-     range (500 miles) at all times.
-
-DP formulation:
-  Nodes: start(0) + eligible stops + finish(D)
-  State dp[i] = min total fuel cost to reach node i (arriving with any fuel level)
-  Transition: for each i -> j where dist(i,j) <= MAX_RANGE:
-      gallons = dist(i, j) / MPG
-      dp[j] = min(dp[j], dp[i] + gallons * price[i])
-  (Start and finish have price=0 — no purchase happens at destination.)
-"""
+"""Fuel-stop projection and dynamic-programming route optimization."""
 
 from __future__ import annotations
 
@@ -24,6 +6,7 @@ import math
 from typing import TypedDict
 
 import numpy as np
+import pygeohash as pgh
 from django.conf import settings
 
 from .fuel_data import FuelStop
@@ -81,71 +64,115 @@ def _cumulative_distances_miles(coords: list[list[float]]) -> np.ndarray:
     return cum
 
 
-def _project_stop_onto_route(
-    stop_lat: float,
-    stop_lon: float,
+def _project_all_stops(
+    stop_lats: np.ndarray,
+    stop_lons: np.ndarray,
     poly_lats: np.ndarray,
     poly_lons: np.ndarray,
     cum_dist: np.ndarray,
-    corridor_miles: float,
-) -> tuple[float, float] | None:
-    """
-    Find the closest point on the polyline (projected onto each segment) to the stop.
-    Returns (route_position_miles, distance_to_route_miles) or None if beyond corridor.
-
-    Uses a planar approximation in miles, which is accurate enough for the corridor
-    filter (max ~5-10 miles deviation at continental US latitudes).
-    """
-    # Convert degrees to approximate miles relative to the stop's latitude
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project every stop onto the route and return positions and distances."""
     lat_scale = 69.0
-    lon_scale = 69.0 * math.cos(math.radians(stop_lat))
+    mean_lat = float(poly_lats.mean())
+    lon_scale = 69.0 * math.cos(math.radians(mean_lat))
 
-    qy = stop_lat * lat_scale
-    qx = stop_lon * lon_scale
+    qy = stop_lats * lat_scale
+    qx = stop_lons * lon_scale
 
     py = poly_lats * lat_scale
     px = poly_lons * lon_scale
 
-    best_dist = float("inf")
-    best_pos = 0.0
+    n_stops = len(stop_lats)
+    best_dist = np.full(n_stops, np.inf)
+    best_pos = np.zeros(n_stops)
 
-    for i in range(len(poly_lats) - 1):
+    for i in range(len(py) - 1):
         ay, ax = py[i], px[i]
         by, bx = py[i + 1], px[i + 1]
 
-        seg_len_sq = (bx - ax) ** 2 + (by - ay) ** 2
+        seg_dy = by - ay
+        seg_dx = bx - ax
+        seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+
         if seg_len_sq < 1e-12:
-            # Degenerate segment — use vertex distance
-            dist = math.hypot(qx - ax, qy - ay)
-            t = 0.0
+            dist = np.hypot(qx - ax, qy - ay)
+            t_arr = np.zeros(n_stops)
         else:
-            t = ((qx - ax) * (bx - ax) + (qy - ay) * (by - ay)) / seg_len_sq
-            t = max(0.0, min(1.0, t))
-            cx = ax + t * (bx - ax)
-            cy = ay + t * (by - ay)
-            dist = math.hypot(qx - cx, qy - cy)
+            t_arr = ((qx - ax) * seg_dx + (qy - ay) * seg_dy) / seg_len_sq
+            np.clip(t_arr, 0.0, 1.0, out=t_arr)
+            cx = ax + t_arr * seg_dx
+            cy = ay + t_arr * seg_dy
+            dist = np.hypot(qx - cx, qy - cy)
 
-        if dist < best_dist:
-            best_dist = dist
-            best_pos = cum_dist[i] + t * (cum_dist[i + 1] - cum_dist[i])
+        improved = dist < best_dist
+        if improved.any():
+            best_dist = np.where(improved, dist, best_dist)
+            best_pos = np.where(
+                improved,
+                cum_dist[i] + t_arr * (cum_dist[i + 1] - cum_dist[i]),
+                best_pos,
+            )
 
-    if best_dist > corridor_miles:
-        return None
-    return float(best_pos), best_dist
+    return best_pos, best_dist
+
+
+_SAMPLE_EVERY_MILES = 10.0
+_GEOHASH_PRECISION = 4
+
+
+def _nine_cells(cell: str) -> list[str]:
+    """Return the cell itself plus its 8 adjacent geohash cells."""
+    top = pgh.get_adjacent(cell, "top")
+    bottom = pgh.get_adjacent(cell, "bottom")
+    return [
+        cell,
+        top,
+        bottom,
+        pgh.get_adjacent(cell, "left"),
+        pgh.get_adjacent(cell, "right"),
+        pgh.get_adjacent(top, "left"),
+        pgh.get_adjacent(top, "right"),
+        pgh.get_adjacent(bottom, "left"),
+        pgh.get_adjacent(bottom, "right"),
+    ]
+
+
+def _candidate_stops(
+    route_coords: list[list[float]],
+    cum_dist: np.ndarray,
+    geohash_index: dict[str, list[FuelStop]],
+) -> list[FuelStop]:
+    """Return fuel stops from route-adjacent geohash cells."""
+    seen_cells: set[str] = set()
+    candidate_ids: set[int] = set()
+    candidates: list[FuelStop] = []
+
+    prev_pos = -_SAMPLE_EVERY_MILES
+    for i, coord in enumerate(route_coords):
+        pos = float(cum_dist[i])
+        if pos - prev_pos < _SAMPLE_EVERY_MILES and i != len(route_coords) - 1:
+            continue
+        prev_pos = pos
+        cell = pgh.encode(coord[1], coord[0], precision=_GEOHASH_PRECISION)
+        if cell in seen_cells:
+            continue
+        seen_cells.add(cell)
+        for neighbor_cell in _nine_cells(cell):
+            for stop in geohash_index.get(neighbor_cell, []):
+                if stop["stop_id"] not in candidate_ids:
+                    candidate_ids.add(stop["stop_id"])
+                    candidates.append(stop)
+
+    return candidates
 
 
 def select_fuel_stops(
     route_coords: list[list[float]],
     total_distance_meters: float,
     fuel_stops: list[FuelStop],
+    geohash_index: dict[str, list[FuelStop]] | None = None,
 ) -> tuple[list[StopResult], float]:
-    """
-    Select the minimum-cost fuel-stop sequence for the route.
-
-    Returns:
-      - List of chosen fuel stops with purchase details.
-      - Total fuel cost in dollars.
-    """
+    """Return the minimum-cost fuel-stop sequence and total cost."""
     corridor_miles: float = getattr(settings, "ROUTE_CORRIDOR_MILES", 5)
     total_miles = total_distance_meters / METERS_PER_MILE
 
@@ -153,30 +180,32 @@ def select_fuel_stops(
     poly_lons = np.array([c[0] for c in route_coords])
     cum_dist = _cumulative_distances_miles(route_coords)
 
-    # --- Project stops onto route, filter by corridor ---
-    projected: list[dict] = []
-    for stop in fuel_stops:
-        result = _project_stop_onto_route(
-            stop["lat"], stop["lon"],
-            poly_lats, poly_lons, cum_dist, corridor_miles,
-        )
-        if result is None:
-            continue
-        pos_miles, _ = result
-        projected.append({**stop, "pos": pos_miles})
+    if geohash_index:
+        candidates = _candidate_stops(route_coords, cum_dist, geohash_index)
+    else:
+        candidates = fuel_stops
 
-    # Sort by route position
+    all_lats = np.array([s["lat"] for s in candidates])
+    all_lons = np.array([s["lon"] for s in candidates])
+
+    positions, distances = _project_all_stops(
+        all_lats, all_lons, poly_lats, poly_lons, cum_dist
+    )
+
+    projected: list[dict] = [
+        {**candidates[i], "pos": float(positions[i])}
+        for i in range(len(candidates))
+        if distances[i] <= corridor_miles
+    ]
+
     projected.sort(key=lambda s: s["pos"])
 
-    # Build node list: start + eligible stops + finish
-    # start: pos=0, price=0; finish: pos=total_miles, price=0
     START = {"pos": 0.0, "price": 0.0, "name": "__start__"}
     FINISH = {"pos": total_miles, "price": 0.0, "name": "__finish__"}
     nodes = [START] + projected + [FINISH]
     n = len(nodes)
     finish_idx = n - 1
 
-    # --- DP ---
     INF = float("inf")
     dp = [INF] * n
     dp[0] = 0.0
@@ -189,7 +218,6 @@ def select_fuel_stops(
             dist_ij = nodes[j]["pos"] - nodes[i]["pos"]
             if dist_ij > MAX_RANGE_MILES:
                 break
-            # Buy exactly enough fuel at i to reach j
             candidate = dp[i] + (dist_ij / MPG) * nodes[i]["price"]
             if candidate < dp[j]:
                 dp[j] = candidate
@@ -200,7 +228,6 @@ def select_fuel_stops(
             "No feasible route found: not enough fuel stops within 500-mile windows."
         )
 
-    # Reconstruct path
     path: list[int] = []
     cur = finish_idx
     while cur != -1:
@@ -208,7 +235,6 @@ def select_fuel_stops(
         cur = prev[cur]
     path.reverse()
 
-    # Build result list (skip start and finish pseudo-nodes)
     results: list[StopResult] = []
     total_cost = 0.0
     for k in range(len(path) - 1):
@@ -216,7 +242,7 @@ def select_fuel_stops(
         next_idx = path[k + 1]
         node = nodes[node_idx]
         if node["name"] == "__start__":
-            continue  # no purchase at start
+            continue
         dist_to_next = nodes[next_idx]["pos"] - node["pos"]
         gallons = dist_to_next / MPG
         cost = gallons * node["price"]
@@ -235,8 +261,5 @@ def select_fuel_stops(
                 position_miles=round(node["pos"], 2),
             )
         )
-
-    # Add start-to-first-stop fuel cost (bought at start if applicable)
-    # The start node has price=0, so no cost — handled by DP already.
 
     return results, round(total_cost, 2)

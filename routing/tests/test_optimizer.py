@@ -8,9 +8,10 @@ from routing.services.optimizer import (
     select_fuel_stops,
     _haversine_miles,
     _cumulative_distances_miles,
+    _candidate_stops,
     METERS_PER_MILE,
 )
-from routing.services.fuel_data import FuelStop
+from routing.services.fuel_data import FuelStop, build_geohash_index
 
 
 def _make_stop(
@@ -45,10 +46,8 @@ def _interpolate_route(
     ]
 
 
-# Dense ~790-mile route from Chicago to New York (lon increases east)
 _LONG_ROUTE = _interpolate_route([-87.63, 41.85], [-74.01, 40.71], n_points=100)
 
-# Short ~345-mile route (Chicago to Cleveland area) — fits within 500-mile tank
 _SHORT_ROUTE = _interpolate_route([-87.63, 41.85], [-81.69, 41.50], n_points=50)
 
 
@@ -58,7 +57,6 @@ class TestHaversine(TestCase):
         self.assertAlmostEqual(_haversine_miles(41.0, -87.0, 41.0, -87.0), 0.0)
 
     def test_chicago_to_cleveland(self):
-        # Straight-line Chicago -> Cleveland ~238 miles
         dist = _haversine_miles(41.85, -87.63, 41.50, -83.04)
         self.assertGreater(dist, 200)
         self.assertLess(dist, 270)
@@ -87,6 +85,42 @@ class TestCumulativeDistances(TestCase):
 
 
 @override_settings(ROUTE_CORRIDOR_MILES=20)
+class TestCandidateStops(TestCase):
+    """Verify the geohash pre-filter returns on-route stops and omits distant ones."""
+
+    def test_on_route_stop_is_a_candidate(self):
+        mid = _LONG_ROUTE[len(_LONG_ROUTE) // 2]
+        on_route = _make_stop(1, "On Route", mid[1], mid[0], 3.00)
+        index = build_geohash_index([on_route])
+        cum = _cumulative_distances_miles(_LONG_ROUTE)
+        candidates = _candidate_stops(_LONG_ROUTE, cum, index)
+        self.assertIn(on_route, candidates)
+
+    def test_far_off_route_stop_is_not_a_candidate(self):
+        mid = _LONG_ROUTE[len(_LONG_ROUTE) // 2]
+        far_stop = _make_stop(2, "Off Route", 25.0, mid[0], 1.00)
+        index = build_geohash_index([far_stop])
+        cum = _cumulative_distances_miles(_LONG_ROUTE)
+        candidates = _candidate_stops(_LONG_ROUTE, cum, index)
+        self.assertNotIn(far_stop, candidates)
+
+    def test_candidate_set_is_smaller_than_total(self):
+        """With stops scattered across the US, only route-adjacent ones are returned."""
+        route_mid = _LONG_ROUTE[len(_LONG_ROUTE) // 2]
+        on_route = _make_stop(1, "On Route", route_mid[1], route_mid[0], 3.00)
+        off_route_stops = [
+            _make_stop(i + 2, f"Off {i}", 25.0 + i, -100.0 + i * 5, 3.00)
+            for i in range(20)
+        ]
+        all_stops = [on_route] + off_route_stops
+        index = build_geohash_index(all_stops)
+        cum = _cumulative_distances_miles(_LONG_ROUTE)
+        candidates = _candidate_stops(_LONG_ROUTE, cum, index)
+        self.assertLess(len(candidates), len(all_stops))
+        self.assertIn(on_route, candidates)
+
+
+@override_settings(ROUTE_CORRIDOR_MILES=20)
 class TestSelectFuelStops(TestCase):
     """Use a ~790-mile route that requires at least one fuel stop."""
 
@@ -98,43 +132,42 @@ class TestSelectFuelStops(TestCase):
         cum = _cumulative_distances_miles(_SHORT_ROUTE)
         return cum[-1] * METERS_PER_MILE
 
-    def _midpoint_stop(self, name: str, price: float) -> FuelStop:
-        """A stop placed at the midpoint of the long route."""
+    def _midpoint_stop(self, name: str, price: float, stop_id: int = 1) -> FuelStop:
         mid = _LONG_ROUTE[len(_LONG_ROUTE) // 2]
-        return _make_stop(1, name, mid[1], mid[0], price)
+        return _make_stop(stop_id, name, mid[1], mid[0], price)
 
     def test_selects_cheapest_stop_in_range(self):
-        """Two stops near midpoint; cheaper one should be chosen."""
         mid_idx = len(_LONG_ROUTE) // 2
         pt_cheap = _LONG_ROUTE[mid_idx]
-        pt_exp = _LONG_ROUTE[mid_idx + 2]  # slightly ahead
+        pt_exp = _LONG_ROUTE[mid_idx + 2]
 
         cheap = _make_stop(1, "Cheap Stop", pt_cheap[1], pt_cheap[0], 2.80)
         expensive = _make_stop(2, "Expensive Stop", pt_exp[1], pt_exp[0], 3.50)
+        index = build_geohash_index([cheap, expensive])
 
         stops, cost = select_fuel_stops(
-            _LONG_ROUTE, self._long_route_meters(), [cheap, expensive]
+            _LONG_ROUTE, self._long_route_meters(), [cheap, expensive],
+            geohash_index=index,
         )
         names = {s["name"] for s in stops}
         self.assertIn("Cheap Stop", names)
         self.assertGreater(cost, 0)
 
     def test_short_route_needs_no_stop(self):
-        """Route < 500 miles can be driven on a single tank."""
         stops, cost = select_fuel_stops(_SHORT_ROUTE, self._short_route_meters(), [])
         self.assertEqual(stops, [])
         self.assertEqual(cost, 0.0)
 
     def test_long_route_no_stops_raises(self):
-        """Route > 500 miles with no stops must raise ValueError."""
         with self.assertRaises(ValueError):
             select_fuel_stops(_LONG_ROUTE, self._long_route_meters(), [])
 
     def test_cost_calculation(self):
-        """Verify cost = gallons * price at the stop."""
         stop = self._midpoint_stop("Middle Stop", 3.00)
+        index = build_geohash_index([stop])
         stops_result, total_cost = select_fuel_stops(
-            _LONG_ROUTE, self._long_route_meters(), [stop]
+            _LONG_ROUTE, self._long_route_meters(), [stop],
+            geohash_index=index,
         )
         self.assertGreater(len(stops_result), 0)
         for s in stops_result:
@@ -143,16 +176,29 @@ class TestSelectFuelStops(TestCase):
         self.assertAlmostEqual(total_cost, sum(s["cost"] for s in stops_result), places=2)
 
     def test_stop_outside_corridor_ignored(self):
-        """A stop far south of the route should not be selected."""
         mid = _LONG_ROUTE[len(_LONG_ROUTE) // 2]
-        far_stop = _make_stop(1, "Off Route", 30.0, mid[0], 1.00)  # 11° south
+        far_stop = _make_stop(1, "Off Route", 30.0, mid[0], 1.00)
         near_stop = _make_stop(2, "On Route", mid[1], mid[0], 3.00)
+        index = build_geohash_index([far_stop, near_stop])
 
         stops_result, _ = select_fuel_stops(
-            _LONG_ROUTE,
-            self._long_route_meters(),
-            [far_stop, near_stop],
+            _LONG_ROUTE, self._long_route_meters(),
+            [far_stop, near_stop], geohash_index=index,
         )
         names = {s["name"] for s in stops_result}
         self.assertNotIn("Off Route", names)
         self.assertIn("On Route", names)
+
+    def test_works_without_geohash_index(self):
+        """geohash_index=None falls back to full scan; result should be identical."""
+        stop = self._midpoint_stop("Stop", 3.00)
+        index = build_geohash_index([stop])
+
+        stops_with, cost_with = select_fuel_stops(
+            _LONG_ROUTE, self._long_route_meters(), [stop], geohash_index=index
+        )
+        stops_without, cost_without = select_fuel_stops(
+            _LONG_ROUTE, self._long_route_meters(), [stop], geohash_index=None
+        )
+        self.assertEqual(cost_with, cost_without)
+        self.assertEqual(len(stops_with), len(stops_without))

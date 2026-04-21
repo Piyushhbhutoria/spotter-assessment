@@ -1,18 +1,4 @@
-"""
-Management command: build_fuel_cache
-
-Geocodes all unique (city, state) pairs from the fuel CSV using ArcGIS
-(no API key required) and saves results to FUEL_GEOCODE_CACHE_PATH.
-
-Run this once before starting the server:
-
-    python manage.py build_fuel_cache
-
-The command is safe to re-run: it skips pairs already in the cache, so
-you can resume an interrupted run or fill gaps from a partial cache.
-
-Expected runtime: a few minutes for ~500 unique city/state pairs.
-"""
+"""Build or refresh the geocode cache used by fuel-stop loading."""
 
 from django.core.management.base import BaseCommand
 from django.conf import settings
@@ -49,7 +35,7 @@ class Command(BaseCommand):
 
         newly_done, already_cached = geocode_missing(cache_path, csv_path, progress)
 
-        self.stdout.write("")  # newline after \r progress
+        self.stdout.write("")
         self.stdout.write(
             self.style.SUCCESS(
                 f"\nDone. {newly_done} newly geocoded, "

@@ -109,14 +109,11 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-# External APIs
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
 
-# Fuel data
 FUEL_CSV_PATH = BASE_DIR / 'Fuel Prices Assessment.csv'
 FUEL_GEOCODE_CACHE_PATH = BASE_DIR / 'fuel_geocode_cache.json'
 
-# Route corridor half-width in miles to consider a fuel stop "on-route"
 ROUTE_CORRIDOR_MILES = 5
 
 REST_FRAMEWORK = {

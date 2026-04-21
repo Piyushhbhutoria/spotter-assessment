@@ -1,20 +1,4 @@
-"""
-Fuel price data loading and geocoding.
-
-The CSV has repeated rows per truckstop ID (multiple price observations).
-Strategy:
-  - Group by OPIS Truckstop ID, keep the minimum retail price row.
-  - Filter to US states only (exclude Canadian provinces etc.).
-  - Geocode once per unique (City, State) pair using ArcGIS (no key, no hard rate limit).
-  - Persist results to FUEL_GEOCODE_CACHE_PATH (JSON):
-      - Coordinates found  → [lat, lon]
-      - Permanently missing → [] (won't be retried)
-      - Not yet attempted  → key absent from cache
-
-Run `python manage.py build_fuel_cache` once to populate the cache before
-starting the server. The server loads stops from the cache and skips cities
-whose coordinates are unknown.
-"""
+"""Fuel CSV loading, deduplication, and geocode cache utilities."""
 
 import csv
 import json
@@ -22,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import TypedDict
 
+import pygeohash as pgh
 from geopy.geocoders import ArcGIS
 from django.conf import settings
 
@@ -90,14 +75,7 @@ def geocode_missing(
     csv_path: Path,
     progress_callback=None,
 ) -> tuple[int, int]:
-    """
-    Geocode any city/state pairs not yet in the cache.
-
-    Uses geopy's RateLimiter (1.1 s between requests, 3 retries with
-    exponential backoff on transient errors).
-
-    Returns (newly_geocoded, already_cached).
-    """
+    """Geocode city/state pairs missing from cache."""
     cache = _load_cache(cache_path)
     stops = _parse_csv(csv_path)
 
@@ -121,7 +99,6 @@ def geocode_missing(
         if location:
             cache[key] = [location.latitude, location.longitude]
         else:
-            # Permanently not found — store [] so we don't retry
             cache[key] = []
             logger.debug("No result for %s, %s", city, state)
         newly_done += 1
@@ -133,13 +110,23 @@ def geocode_missing(
     return newly_done, len(city_state_pairs) - len(missing)
 
 
-def load_fuel_stops() -> list[FuelStop]:
-    """
-    Load fuel stops from the CSV using cached coordinates.
+_GEOHASH_PRECISION = 4  # cells ≈ 40 × 20 km; sufficient for 5-mile corridor lookup
 
-    Stops whose city could not be geocoded (or not yet in cache) are excluded.
-    Run `python manage.py build_fuel_cache` first to populate the cache.
-    """
+
+def build_geohash_index(
+    stops: list[FuelStop],
+    precision: int = _GEOHASH_PRECISION,
+) -> dict[str, list[FuelStop]]:
+    """Build `geohash -> stops` index for nearby stop lookup."""
+    index: dict[str, list[FuelStop]] = {}
+    for stop in stops:
+        cell = pgh.encode(stop["lat"], stop["lon"], precision=precision)
+        index.setdefault(cell, []).append(stop)
+    return index
+
+
+def load_fuel_stops() -> tuple[list[FuelStop], dict[str, list[FuelStop]]]:
+    """Load fuel stops and return `(stops, geohash_index)`."""
     csv_path: Path = settings.FUEL_CSV_PATH
     cache_path: Path = settings.FUEL_GEOCODE_CACHE_PATH
 
@@ -153,9 +140,9 @@ def load_fuel_stops() -> list[FuelStop]:
         coords = cache.get(key)
         if coords is None:
             missing_count += 1
-            continue  # not yet geocoded — run build_fuel_cache
+            continue
         if len(coords) != 2:
-            continue  # permanently not found
+            continue
         stops.append(
             FuelStop(
                 stop_id=row["stop_id"],
@@ -176,4 +163,4 @@ def load_fuel_stops() -> list[FuelStop]:
             missing_count,
         )
     logger.info("Loaded %d fuel stops with coordinates", len(stops))
-    return stops
+    return stops, build_geohash_index(stops)

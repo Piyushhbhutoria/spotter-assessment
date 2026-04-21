@@ -32,6 +32,8 @@ _MOCK_STOPS = [
     }
 ]
 
+_MOCK_COORDS = ((41.85, -87.63), (34.05, -118.24))
+
 
 class TestRouteView(TestCase):
     def setUp(self):
@@ -60,30 +62,30 @@ class TestRouteView(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    @patch("routing.views._get_fuel_stops")
+    @patch("routing.views._get_fuel_data")
     @patch("routing.views.ors_client.get_route")
-    @patch("routing.views.ors_client.geocode")
-    def test_empty_fuel_cache_returns_503(self, mock_geo, mock_route, mock_stops):
-        mock_geo.side_effect = [(41.85, -87.63), (34.05, -118.24)]
+    @patch("routing.views.ors_client.geocode_pair")
+    def test_empty_fuel_cache_returns_503(self, mock_pair, mock_route, mock_data):
+        mock_pair.return_value = _MOCK_COORDS
         mock_route.return_value = _MOCK_ROUTE
-        mock_stops.return_value = []  # cache not built yet
+        mock_data.return_value = ([], {})
         resp = self._post({"start": "Chicago, IL", "finish": "Los Angeles, CA"})
         self.assertEqual(resp.status_code, 503)
         self.assertIn("build_fuel_cache", resp.json()["error"])
 
     def test_unknown_location_returns_400(self):
-        with patch("routing.views.ors_client.geocode") as mock_geo:
-            mock_geo.side_effect = ValueError("Could not geocode location: 'Xyz123'")
+        with patch("routing.views.ors_client.geocode_pair") as mock_pair:
+            mock_pair.side_effect = ValueError("Could not geocode location: 'Xyz123'")
             resp = self._post({"start": "Xyz123", "finish": "Los Angeles, CA"})
         self.assertEqual(resp.status_code, 400)
 
-    @patch("routing.views._get_fuel_stops")
+    @patch("routing.views._get_fuel_data")
     @patch("routing.views.ors_client.get_route")
-    @patch("routing.views.ors_client.geocode")
-    def test_successful_route_response_shape(self, mock_geo, mock_route, mock_stops):
-        mock_geo.side_effect = [(41.85, -87.63), (34.05, -118.24)]
+    @patch("routing.views.ors_client.geocode_pair")
+    def test_successful_route_response_shape(self, mock_pair, mock_route, mock_data):
+        mock_pair.return_value = _MOCK_COORDS
         mock_route.return_value = _MOCK_ROUTE
-        mock_stops.return_value = _MOCK_STOPS  # non-empty so guard passes
+        mock_data.return_value = (_MOCK_STOPS, {"dp3w": _MOCK_STOPS})
 
         with patch("routing.views.optimizer.select_fuel_stops") as mock_opt:
             mock_opt.return_value = (_MOCK_STOPS, 93.0)
@@ -101,13 +103,13 @@ class TestRouteView(TestCase):
         self.assertEqual(len(data["fuel_stops"]), 1)
         self.assertEqual(data["total_fuel_cost"], 93.0)
 
-    @patch("routing.views._get_fuel_stops")
+    @patch("routing.views._get_fuel_data")
     @patch("routing.views.ors_client.get_route")
-    @patch("routing.views.ors_client.geocode")
-    def test_no_feasible_route_returns_422(self, mock_geo, mock_route, mock_stops):
-        mock_geo.side_effect = [(41.85, -87.63), (34.05, -118.24)]
+    @patch("routing.views.ors_client.geocode_pair")
+    def test_no_feasible_route_returns_422(self, mock_pair, mock_route, mock_data):
+        mock_pair.return_value = _MOCK_COORDS
         mock_route.return_value = _MOCK_ROUTE
-        mock_stops.return_value = _MOCK_STOPS  # non-empty so guard passes
+        mock_data.return_value = (_MOCK_STOPS, {"dp3w": _MOCK_STOPS})
 
         with patch("routing.views.optimizer.select_fuel_stops") as mock_opt:
             mock_opt.side_effect = ValueError("No feasible route found")
